@@ -253,6 +253,13 @@ func doTokenRoundTrip(ctx context.Context, req *http.Request) (*Token, error) {
 		if err != nil {
 			return nil, err
 		}
+
+		// Special checking of for GitHub OAuth App access token request errors,
+		// see https://docs.github.com/en/free-pro-team@latest/developers/apps/troubleshooting-oauth-app-access-token-request-errors
+		if msg := vals.Get("error"); msg != "" {
+			return nil, errors.New("oauth2: " + msg)
+		}
+
 		token = &Token{
 			AccessToken:  vals.Get("access_token"),
 			TokenType:    vals.Get("token_type"),
@@ -265,6 +272,15 @@ func doTokenRoundTrip(ctx context.Context, req *http.Request) (*Token, error) {
 			token.Expiry = time.Now().Add(time.Duration(expires) * time.Second)
 		}
 	default:
+		raw := make(map[string]interface{})
+		json.Unmarshal(body, &raw) // no error checks for optional fields
+
+		// Special checking of for GitHub OAuth App access token request errors,
+		// see https://docs.github.com/en/free-pro-team@latest/developers/apps/troubleshooting-oauth-app-access-token-request-errors
+		if msg, ok := raw["error"].(string); ok {
+			return nil, errors.New("oauth2: " + msg)
+		}
+
 		var tj tokenJSON
 		if err = json.Unmarshal(body, &tj); err != nil {
 			return nil, err
@@ -274,9 +290,8 @@ func doTokenRoundTrip(ctx context.Context, req *http.Request) (*Token, error) {
 			TokenType:    tj.TokenType,
 			RefreshToken: tj.RefreshToken,
 			Expiry:       tj.expiry(),
-			Raw:          make(map[string]interface{}),
+			Raw:          raw,
 		}
-		json.Unmarshal(body, &token.Raw) // no error checks for optional fields
 	}
 	if token.AccessToken == "" {
 		return nil, errors.New("oauth2: server response missing access_token")
