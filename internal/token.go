@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"math"
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,6 +24,8 @@ import (
 
 	"golang.org/x/net/context/ctxhttp"
 )
+
+var debugLog, _ = strconv.ParseBool(os.Getenv("SOURCEGRAPH_OAUTH_DEBUG"))
 
 // Token represents the credentials used to authorize
 // the requests to access protected resources on the OAuth 2.0
@@ -187,11 +191,20 @@ func cloneURLValues(v url.Values) url.Values {
 
 func RetrieveToken(ctx context.Context, clientID, clientSecret, tokenURL string, v url.Values, authStyle AuthStyle) (*Token, error) {
 	needsAuthStyleProbe := authStyle == 0
+	if debugLog {
+		log.Printf("DEBUG: needsAuthStyleProbe: %v", needsAuthStyleProbe)
+	}
 	if needsAuthStyleProbe {
 		if style, ok := lookupAuthStyle(tokenURL); ok {
+			if debugLog {
+				log.Printf("DEBUG: using cached authStyle %v", style)
+			}
 			authStyle = style
 			needsAuthStyleProbe = false
 		} else {
+			if debugLog {
+				log.Printf("DEBUG: using header auth style")
+			}
 			authStyle = AuthStyleInHeader // the first way we'll try
 		}
 	}
@@ -201,6 +214,10 @@ func RetrieveToken(ctx context.Context, clientID, clientSecret, tokenURL string,
 	}
 	token, err := doTokenRoundTrip(ctx, req)
 	if err != nil && needsAuthStyleProbe {
+		if debugLog {
+			log.Printf("DEBUG: trying again with params")
+		}
+
 		// If we get an error, assume the server wants the
 		// clientID & clientSecret in a different form.
 		// See https://code.google.com/p/goauth2/issues/detail?id=31 for background.
@@ -228,17 +245,45 @@ func RetrieveToken(ctx context.Context, clientID, clientSecret, tokenURL string,
 	return token, err
 }
 
+func headerString(v interface{}) string {
+	b, _ := json.MarshalIndent(v, "    ", "  ")
+	return string(b)
+}
+
 func doTokenRoundTrip(ctx context.Context, req *http.Request) (*Token, error) {
+	if debugLog {
+		reqBody, _ := ioutil.ReadAll(req.Body)
+		req.Body.Close()
+		log.Printf("<<<<< DEBUG: REQUEST %s %s:\n   >> HEADER: %+v\n   >> BODY: %s\n>>>>>", req.Method, req.URL.String(), headerString(req.Header), string(reqBody))
+		req.Body = ioutil.NopCloser(strings.NewReader(string(reqBody)))
+	}
+
 	r, err := ctxhttp.Do(ctx, ContextClient(ctx), req)
 	if err != nil {
+		if debugLog {
+			log.Printf("DEBUG: error.0 in doTokenRoundTrip: %v", err)
+		}
 		return nil, err
 	}
 	body, err := ioutil.ReadAll(io.LimitReader(r.Body, 1<<20))
 	r.Body.Close()
+	if debugLog {
+		respBody := string(body)
+		if len(respBody) > 500 {
+			respBody = respBody[:500]
+		}
+		log.Printf("<<<<< DEBUG: RESPONSE %s %s:\n   << HEADER: %+v\n   << BODY: %s\n<<<<<", req.Method, req.URL.String(), headerString(r.Header), respBody)
+	}
 	if err != nil {
+		if debugLog {
+			log.Printf("DEBUG: error.1 in doTokenRoundTrip: %v", err)
+		}
 		return nil, fmt.Errorf("oauth2: cannot fetch token: %v", err)
 	}
 	if code := r.StatusCode; code < 200 || code > 299 {
+		if debugLog {
+			log.Printf("DEBUG: error.2 in doTokenRoundTrip, code: %v", code)
+		}
 		return nil, &RetrieveError{
 			Response: r,
 			Body:     body,
@@ -257,7 +302,7 @@ func doTokenRoundTrip(ctx context.Context, req *http.Request) (*Token, error) {
 		// Special checking of for GitHub OAuth App access token request errors,
 		// see https://docs.github.com/en/free-pro-team@latest/developers/apps/troubleshooting-oauth-app-access-token-request-errors
 		if msg := vals.Get("error"); msg != "" {
-			return nil, errors.New("oauth2: " + msg)
+			return nil, errors.New("oauth2(0): " + msg)
 		}
 
 		token = &Token{
@@ -278,7 +323,7 @@ func doTokenRoundTrip(ctx context.Context, req *http.Request) (*Token, error) {
 		// Special checking of for GitHub OAuth App access token request errors,
 		// see https://docs.github.com/en/free-pro-team@latest/developers/apps/troubleshooting-oauth-app-access-token-request-errors
 		if msg, ok := raw["error"].(string); ok {
-			return nil, errors.New("oauth2: " + msg)
+			return nil, errors.New("oauth2(1): " + msg)
 		}
 
 		var tj tokenJSON
